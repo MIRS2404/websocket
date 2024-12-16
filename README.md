@@ -12,5 +12,6 @@ ros2 run websocket robot_control_node
 ```
 別のターミナルを起動 
 ```bash
+cd mirs2404_ws
 ros2 run websocket raspi_receiver
 ```
