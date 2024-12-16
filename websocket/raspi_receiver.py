@@ -5,12 +5,12 @@ import json
 import configparser
 import rclpy
 from rclpy.node import Node
-from std_srvs.srv import Trigger
+from action_msgs.srv import CancelGoal
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import SingleThreadedExecutor
 import threading
 import os
 from ament_index_python.packages import get_package_share_directory
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.executors import SingleThreadedExecutor
 
 # configの読み込み
 config_ini = configparser.ConfigParser()
@@ -21,54 +21,78 @@ class WebSocketNode(Node):
     def __init__(self):
         super().__init__('websocket_controller')
         
-        # 各サービスクライアント用の個別のコールバックグループを作成
-        self.pause_callback_group = MutuallyExclusiveCallbackGroup()
-        self.resume_callback_group = MutuallyExclusiveCallbackGroup()
+        # Nav2の主要なアクションサーバーのリスト
+        self.nav2_actions = [
+            '/navigate_to_pose',
+            '/navigate_through_poses',
+            '/follow_path',
+            '/follow_waypoints',
+            '/assisted_teleop',
+            '/backup',
+            '/compute_path_through_poses',
+            '/compute_path_to_pose',
+            '/drive_on_heading',
+            '/spin',
+            '/wait'
+        ]
         
-        # サービスクライアントの作成
-        self.pause_client = self.create_client(
-            Trigger, 
-            'pause_robot_service',
-            callback_group=self.pause_callback_group
-        )
-        
-        self.resume_client = self.create_client(
-            Trigger, 
-            'resume_robot_service',
-            callback_group=self.resume_callback_group
-        )
+        # 各アクションサーバーのキャンセルクライアントを作成
+        self.cancel_clients = {}
+        for action in self.nav2_actions:
+            callback_group = MutuallyExclusiveCallbackGroup()
+            client = self.create_client(
+                CancelGoal,
+                f'{action}/_action/cancel_goal',
+                callback_group=callback_group
+            )
+            self.cancel_clients[action] = {
+                'client': client,
+                'callback_group': callback_group
+            }
 
-    async def call_pause_service(self):
-        while not self.pause_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('pause_robot_service not available, waiting...')
+    async def cancel_all_nav2_actions(self):
+        """すべてのNav2アクションをキャンセルする"""
+        cancel_futures = []
         
-        request = Trigger.Request()
-        future = self.pause_client.call_async(request)
-        await asyncio.get_event_loop().run_in_executor(None, self._spin_until_future_complete, future)
-        return future.result()
+        for action, client_info in self.cancel_clients.items():
+            client = client_info['client']
+            if not client.wait_for_service(timeout_sec=0.5):
+                self.get_logger().warn(f'Cancel service for {action} not available')
+                continue
+                
+            request = CancelGoal.Request()
+            future = client.call_async(request)
+            cancel_futures.append(future)
+            
+        if cancel_futures:
+            # すべてのキャンセルリクエストを並行して実行
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                self._spin_until_futures_complete,
+                cancel_futures
+            )
+            
+            # 結果をログに出力
+            for action, future in zip(self.nav2_actions, cancel_futures):
+                if future.done():
+                    try:
+                        result = future.result()
+                        self.get_logger().info(f'Cancelled {action}: {result}')
+                    except Exception as e:
+                        self.get_logger().error(f'Failed to cancel {action}: {str(e)}')
 
-    async def call_resume_service(self):
-        while not self.resume_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('resume_robot_service not available, waiting...')
-        
-        request = Trigger.Request()
-        future = self.resume_client.call_async(request)
-        await asyncio.get_event_loop().run_in_executor(None, self._spin_until_future_complete, future)
-        return future.result()
-
-    def _spin_until_future_complete(self, future):
+    def _spin_until_futures_complete(self, futures):
+        """複数のfutureが完了するまでスピンする"""
         executor = SingleThreadedExecutor()
         executor.add_node(self)
-        executor.spin_until_future_complete(future)
+        for future in futures:
+            executor.spin_until_future_complete(future)
         executor.shutdown()
 
 class WebSocketServer:
     def __init__(self):
-        # ROS2ノードの初期化
         rclpy.init()
         self.node = WebSocketNode()
-        
-        # ROS2スピンループ用のスレッド作成と開始
         self.ros_thread = threading.Thread(target=self._ros_spin, daemon=True)
         self.ros_thread.start()
 
@@ -89,9 +113,8 @@ class WebSocketServer:
 
     async def control(self, data):
         if data['button'] == 'button1' and data['pressed'] == True:
-            print("止まります")
-            result = await self.node.call_pause_service()
-            print(f"Pause result: {result.message}")
+            print("Nav2のアクションをすべてキャンセルします")
+            await self.node.cancel_all_nav2_actions()
 
         if data['button'] == 'button2' and data['pressed'] == True:
             print("水出し中")
@@ -101,8 +124,6 @@ class WebSocketServer:
 
         if data['start'] == True:
             print("走り出します")
-            result = await self.node.call_resume_service()
-            print(f"Resume result: {result.message}")
 
     async def serve(self):
         host = config_ini.get('raspi_recever', 'HOST')
@@ -110,7 +131,7 @@ class WebSocketServer:
         
         async with websockets.serve(self.echo, host, port):
             print(f"IP {host},ポート{port}で待機")
-            await asyncio.Future()  # 無限に待機
+            await asyncio.Future()
 
 def main():
     server = WebSocketServer()
