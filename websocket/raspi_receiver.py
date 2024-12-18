@@ -6,7 +6,7 @@ import configparser
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
-from mirs_msgs.srv import SimpleCommand  # 追加
+from mirs_msgs.srv import SimpleCommand
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import SingleThreadedExecutor
 import threading
@@ -25,16 +25,22 @@ class WebSocketNode(Node):
         # ROSロガーの設定
         self.get_logger().info('WebSocket controller node started')
 
-        # 水サービスクライアントの追加
+        # 水サービスクライアントの初期化
+        self.water_client = None
+        self.setup_water_client()
+
+    def setup_water_client(self):
+        """水サービスクライアントのセットアップ"""
         self.water_client = self.create_client(
             SimpleCommand, 
             '/water',
             callback_group=MutuallyExclusiveCallbackGroup()
         )
-        
-        # サービスの待機
-        while not self.water_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('水サービスが利用可能になるまで待機中...')
+        # 初回接続確認（1秒待機）
+        if self.water_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('水サービスの準備が完了しました')
+        else:
+            self.get_logger().warn('水サービスは現在利用できません')
 
     async def call_service_async(self, client, request):
         """サービスを非同期で呼び出す"""
@@ -76,32 +82,39 @@ class WebSocketServer:
             await self.control(data)
 
     async def control(self, data):
-        if data['button'] == 'button1' and data['pressed'] == True:
-            print("Nav2のアクションをすべてキャンセルします")
-            # cancel_navigationサービスを呼び出し
-            cancel_client = self.node.create_client(Trigger, 'cancel_navigation')
-            if cancel_client.wait_for_service(timeout_sec=1.0):
-                request = Trigger.Request()
-                response = await self.node.call_service_async(cancel_client, request)
-                if response.success:
-                    self.node.get_logger().info('Navigation cancelled successfully')
-                else:
-                    self.node.get_logger().warn('Failed to cancel navigation')
+        if data['button'] == 'button2' and data['pressed'] == True:
+            print("水出し中")
+            # 水サービスの呼び出し
+            if self.node.water_client and self.node.water_client.wait_for_service(timeout_sec=0.1):
+                request = SimpleCommand.Request()
+                self.node.get_logger().info('水サービスにリクエストを送信します')
+                try:
+                    response = await self.node.call_service_async(self.node.water_client, request)
+                    self.node.get_logger().info('水サービスからレスポンスを受信しました')
+                    if response.success:
+                        self.node.get_logger().info('水の供給に成功しました')
+                    else:
+                        self.node.get_logger().warn('水の供給に失敗しました')
+                except Exception as e:
+                    self.node.get_logger().error(f'水サービスの呼び出しでエラーが発生しました: {str(e)}')
             else:
-                self.node.get_logger().error('Cancel service not available')
+                self.node.get_logger().error('水サービスは利用できません')
 
         if data['button'] == 'button2' and data['pressed'] == True:
             print("水出し中")
             # 水サービスの呼び出し
-            request = SimpleCommand.Request()
-            try:
-                response = await self.node.call_service_async(self.node.water_client, request)
-                if response.success:
-                    self.node.get_logger().info('水の供給に成功しました')
-                else:
-                    self.node.get_logger().warn('水の供給に失敗しました')
-            except Exception as e:
-                self.node.get_logger().error(f'水サービスの呼び出しでエラーが発生しました: {str(e)}')
+            if self.node.water_client and self.node.water_client.wait_for_service(timeout_sec=0.1):
+                request = SimpleCommand.Request()
+                try:
+                    response = await self.node.call_service_async(self.node.water_client, request)
+                    if response.success:
+                        self.node.get_logger().info('水の供給に成功しました')
+                    else:
+                        self.node.get_logger().warn('水の供給に失敗しました')
+                except Exception as e:
+                    self.node.get_logger().error(f'水サービスの呼び出しでエラーが発生しました: {str(e)}')
+            else:
+                self.node.get_logger().error('水サービスは利用できません')
         
         if data['button'] == 'button2' and data['pressed'] == False:
             print("水出し終了")
