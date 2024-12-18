@@ -82,23 +82,19 @@ class WebSocketServer:
             await self.control(data)
 
     async def control(self, data):
-        if data['button'] == 'button2' and data['pressed'] == True:
-            print("水出し中")
-            # 水サービスの呼び出し
-            if self.node.water_client and self.node.water_client.wait_for_service(timeout_sec=0.1):
-                request = SimpleCommand.Request()
-                self.node.get_logger().info('水サービスにリクエストを送信します')
-                try:
-                    response = await self.node.call_service_async(self.node.water_client, request)
-                    self.node.get_logger().info('水サービスからレスポンスを受信しました')
-                    if response.success:
-                        self.node.get_logger().info('水の供給に成功しました')
-                    else:
-                        self.node.get_logger().warn('水の供給に失敗しました')
-                except Exception as e:
-                    self.node.get_logger().error(f'水サービスの呼び出しでエラーが発生しました: {str(e)}')
+        if data['button'] == 'button1' and data['pressed'] == True:
+            print("Nav2のアクションをすべてキャンセルします")
+            # cancel_navigationサービスを呼び出し
+            cancel_client = self.node.create_client(Trigger, 'cancel_navigation')
+            if cancel_client.wait_for_service(timeout_sec=1.0):
+                request = Trigger.Request()
+                response = await self.node.call_service_async(cancel_client, request)
+                if response.success:
+                    self.node.get_logger().info('Navigation cancelled successfully')
+                else:
+                    self.node.get_logger().warn('Failed to cancel navigation')
             else:
-                self.node.get_logger().error('水サービスは利用できません')
+                self.node.get_logger().error('Cancel service not available')
 
         if data['button'] == 'button2' and data['pressed'] == True:
             print("水出し中")
