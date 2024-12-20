@@ -5,6 +5,7 @@ import json
 import configparser
 import rclpy
 from rclpy.node import Node
+from action_msgs.srv import CancelGoal
 from std_srvs.srv import Trigger
 from mirs_msgs.srv import SimpleCommand
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -28,6 +29,76 @@ class WebSocketNode(Node):
         # 水サービスクライアントの初期化
         self.water_client = None
         self.setup_water_client()
+
+
+        #Nav2のキャンセル
+        self.nav2_actions = [
+            '/navigate_to_pose',
+            '/navigate_through_poses',
+            '/follow_path',
+            '/follow_waypoints',
+            '/assisted_teleop',
+            '/backup',
+            '/compute_path_through_poses',
+            '/compute_path_to_pose',
+            '/drive_on_heading',
+            '/spin',
+            '/wait'
+        ]
+        
+        # 各アクションサーバーのキャンセルクライアントを作成
+        self.cancel_clients = {}
+        for action in self.nav2_actions:
+            callback_group = MutuallyExclusiveCallbackGroup()
+            client = self.create_client(
+                CancelGoal,
+                f'{action}/_action/cancel_goal',
+                callback_group=callback_group
+            )
+            self.cancel_clients[action] = {
+                'client': client,
+                'callback_group': callback_group
+            }
+
+    async def cancel_all_nav2_actions(self):
+        """すべてのNav2アクションをキャンセルする"""
+        cancel_futures = []
+        
+        for action, client_info in self.cancel_clients.items():
+            client = client_info['client']
+            if not client.wait_for_service(timeout_sec=0.5):
+                self.get_logger().warn(f'Cancel service for {action} not available')
+                continue
+                
+            request = CancelGoal.Request()
+            future = client.call_async(request)
+            cancel_futures.append(future)
+            
+        if cancel_futures:
+            # すべてのキャンセルリクエストを並行して実行
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                self._spin_until_futures_complete,
+                cancel_futures
+            )
+            
+            # 結果をログに出力
+            for action, future in zip(self.nav2_actions, cancel_futures):
+                if future.done():
+                    try:
+                        result = future.result()
+                        self.get_logger().info(f'Cancelled {action}: {result}')
+                    except Exception as e:
+                        self.get_logger().error(f'Failed to cancel {action}: {str(e)}')
+
+    def _spin_until_futures_complete(self, futures):
+        """複数のfutureが完了するまでスピンする"""
+        executor = SingleThreadedExecutor()
+        executor.add_node(self)
+        for future in futures:
+            executor.spin_until_future_complete(future)
+        executor.shutdown()
+
 
     def setup_water_client(self):
         """水サービスクライアントのセットアップ"""
@@ -84,17 +155,22 @@ class WebSocketServer:
     async def control(self, data):
         if data['button'] == 'button1' and data['pressed'] == True:
             print("Nav2のアクションをすべてキャンセルします")
+            await self.node.cancel_all_nav2_actions()
             # cancel_navigationサービスを呼び出し
-            cancel_client = self.node.create_client(Trigger, 'cancel_navigation')
-            if cancel_client.wait_for_service(timeout_sec=1.0):
-                request = Trigger.Request()
-                response = await self.node.call_service_async(cancel_client, request)
-                if response.success:
-                    self.node.get_logger().info('Navigation cancelled successfully')
-                else:
-                    self.node.get_logger().warn('Failed to cancel navigation')
-            else:
-                self.node.get_logger().error('Cancel service not available')
+#            try:
+#                cancel_client = self.node.create_client(Trigger, 'cancel_navigation')
+#               if cancel_client.wait_for_service(timeout_sec=1.0):
+#                    request = Trigger.Request()
+#                    response = await self.node.call_service_async(cancel_client, request)
+#                    if response.success:
+#                        self.node.get_logger().info('Navigation cancelled successfully')
+#                    else:
+#                        self.node.get_logger().warn('Failed to cancel navigation')
+#                else:
+#                    self.node.get_logger().error('Cancel service not available')
+#            except Exception as e:
+#                self.node.get_logger().error(f'Error in cancel_navigation: {str(e)}')
+
 
         if data['button'] == 'button2' and data['pressed'] == True:
             print("水出し中")
@@ -118,16 +194,19 @@ class WebSocketServer:
         if data['start'] == True:
             print("走り出します")
             # resume_navigationサービスを呼び出し
-            resume_client = self.node.create_client(Trigger, 'resume_navigation')
-            if resume_client.wait_for_service(timeout_sec=1.0):
-                request = Trigger.Request()
-                response = await self.node.call_service_async(resume_client, request)
-                if response.success:
-                    self.node.get_logger().info('Navigation resumed successfully')
+            try:
+                resume_client = self.node.create_client(Trigger, 'resume_navigation')
+                if resume_client.wait_for_service(timeout_sec=1.0):
+                    request = Trigger.Request()
+                    response = await self.node.call_service_async(resume_client, request)
+                    if response.success:
+                        self.node.get_logger().info('Navigation resumed successfully')
+                    else:
+                        self.node.get_logger().warn('Failed to resume navigation')
                 else:
-                    self.node.get_logger().warn('Failed to resume navigation')
-            else:
-                self.node.get_logger().error('Resume service not available')
+                    self.node.get_logger().error('Resume service not available')
+            except Exception as e:
+                self.node.get_logger().error(f'Error in resume_navigation: {str(e)}')
 
     async def serve(self):
         host = config_ini.get('raspi_recever', 'HOST')
