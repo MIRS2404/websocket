@@ -26,12 +26,13 @@ class WebSocketNode(Node):
         # ROSロガーの設定
         self.get_logger().info('WebSocket controller node started')
 
-        # 水サービスクライアントの初期化
+        # 水サービスとナビゲーション再開サービスのクライアントの初期化
         self.water_client = None
+        self.resume_client = None
         self.setup_water_client()
+        self.setup_resume_client()
 
-
-        #Nav2のキャンセル
+        # Nav2のキャンセル処理の設定
         self.nav2_actions = [
             '/navigate_to_pose',
             '/navigate_through_poses',
@@ -46,7 +47,6 @@ class WebSocketNode(Node):
             '/wait'
         ]
         
-        # 各アクションサーバーのキャンセルクライアントを作成
         self.cancel_clients = {}
         for action in self.nav2_actions:
             callback_group = MutuallyExclusiveCallbackGroup()
@@ -99,7 +99,6 @@ class WebSocketNode(Node):
             executor.spin_until_future_complete(future)
         executor.shutdown()
 
-
     def setup_water_client(self):
         """水サービスクライアントのセットアップ"""
         self.water_client = self.create_client(
@@ -107,11 +106,22 @@ class WebSocketNode(Node):
             '/water',
             callback_group=MutuallyExclusiveCallbackGroup()
         )
-        # 初回接続確認（1秒待機）
         if self.water_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('水サービスの準備が完了しました')
         else:
             self.get_logger().warn('水サービスは現在利用できません')
+
+    def setup_resume_client(self):
+        """ナビゲーション再開サービスクライアントのセットアップ"""
+        self.resume_client = self.create_client(
+            Trigger,
+            'resume_navigation',
+            callback_group=MutuallyExclusiveCallbackGroup()
+        )
+        if self.resume_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('ナビゲーション再開サービスの準備が完了しました')
+        else:
+            self.get_logger().warn('ナビゲーション再開サービスは現在利用できません')
 
     async def call_service_async(self, client, request):
         """サービスを非同期で呼び出す"""
@@ -156,25 +166,9 @@ class WebSocketServer:
         if data['button'] == 'button1' and data['pressed'] == True:
             print("Nav2のアクションをすべてキャンセルします")
             await self.node.cancel_all_nav2_actions()
-            # cancel_navigationサービスを呼び出し
-#            try:
-#                cancel_client = self.node.create_client(Trigger, 'cancel_navigation')
-#               if cancel_client.wait_for_service(timeout_sec=1.0):
-#                    request = Trigger.Request()
-#                    response = await self.node.call_service_async(cancel_client, request)
-#                    if response.success:
-#                        self.node.get_logger().info('Navigation cancelled successfully')
-#                    else:
-#                        self.node.get_logger().warn('Failed to cancel navigation')
-#                else:
-#                    self.node.get_logger().error('Cancel service not available')
-#            except Exception as e:
-#                self.node.get_logger().error(f'Error in cancel_navigation: {str(e)}')
-
 
         if data['button'] == 'button2' and data['pressed'] == True:
             print("水出し中")
-            # 水サービスの呼び出し
             if self.node.water_client and self.node.water_client.wait_for_service(timeout_sec=0.1):
                 request = SimpleCommand.Request()
                 try:
@@ -193,20 +187,18 @@ class WebSocketServer:
 
         if data['start'] == True:
             print("走り出します")
-            # resume_navigationサービスを呼び出し
-            try:
-                resume_client = self.node.create_client(Trigger, 'resume_navigation')
-                if resume_client.wait_for_service(timeout_sec=1.0):
-                    request = Trigger.Request()
-                    response = await self.node.call_service_async(resume_client, request)
+            if self.node.resume_client and self.node.resume_client.wait_for_service(timeout_sec=0.1):
+                request = Trigger.Request()
+                try:
+                    response = await self.node.call_service_async(self.node.resume_client, request)
                     if response.success:
-                        self.node.get_logger().info('Navigation resumed successfully')
+                        self.node.get_logger().info('ナビゲーションの再開に成功しました')
                     else:
-                        self.node.get_logger().warn('Failed to resume navigation')
-                else:
-                    self.node.get_logger().error('Resume service not available')
-            except Exception as e:
-                self.node.get_logger().error(f'Error in resume_navigation: {str(e)}')
+                        self.node.get_logger().warn('ナビゲーションの再開に失敗しました')
+                except Exception as e:
+                    self.node.get_logger().error(f'ナビゲーション再開サービスの呼び出しでエラーが発生しました: {str(e)}')
+            else:
+                self.node.get_logger().error('ナビゲーション再開サービスは利用できません')
 
     async def serve(self):
         host = config_ini.get('raspi_recever', 'HOST')
@@ -222,3 +214,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
